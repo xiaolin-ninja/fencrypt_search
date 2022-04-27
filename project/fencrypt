@@ -8,6 +8,7 @@ import os
 import secrets
 import hmac
 import hashlib
+import re
 from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -111,8 +112,8 @@ def validate_file(f):
 def encryptor(f):
 	validate_file(f)
 
-	data = Path(f.name).read_bytes()
-	ct = encrypt(data)
+	data = Path(f.name).read_text()
+	ct = encrypt(data.encode('utf-8'))
 	generate_search_terms(data)
 
 	write_file(f, ct)
@@ -124,10 +125,10 @@ def encrypt(data):
 
 	k1, k2, k3, k4 = KEYS["feistel"]
 	mk = KEYS["mac"]
-	r1 = enc_ctr_round(data, k1)
-	r2 = enc_hmac_round(r1, k2)
-	r3 = enc_ctr_round(r2, k3)
-	ct = enc_hmac_round(r3, k4)
+	r1 = ctr_round(data, k1)
+	r2 = hmac_round(r1, k2)
+	r3 = ctr_round(r2, k3)
+	ct = hmac_round(r3, k4)
 
 	mac = hmac.new(mk, ct, hashlib.sha256).hexdigest()
 	METADATA["mac"] = mac
@@ -136,7 +137,17 @@ def encrypt(data):
 
 
 def generate_search_terms(data):
-	print("\n", data, "\n")
+	categories = ["Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Nd", "Pc"]
+	words = []
+	word = ""
+	for c in data:
+		if unicodedata.category(c) in categories:
+			word += c
+		else:
+			if 4 <= len(word) <= 12 and word not in words:
+				words.append(word)
+			word = ""
+	return sorted(words)
 
 
 def ctr_round(data, key):
