@@ -95,10 +95,10 @@ def validate_flags(args):
 		for file in args.d:
 			if not Path(get_metadata_file_path(file)).is_file():
 				raise_err("Metadata not found for %s. " % file.name + "Program aborted. No files decrypted.")
-			decrypt(file)
+			decryptor(file)
 	if args.e:
 		for file in args.e:
-			encrypt(file)
+			encryptor(file)
 
 
 def validate_file(f):
@@ -108,18 +108,18 @@ def validate_file(f):
 
 ################# ENCRYPTION ################# 
 
-def encrypt(f):
+def encryptor(f):
 	validate_file(f)
 
 	data = Path(f.name).read_bytes()
-	ct = feistel_and_mac(data)
+	ct = encrypt(data)
 	generate_search_terms(data)
 
 	write_file(f, ct)
 	write_metadata(f)
 
 
-def feistel_and_mac(data):
+def encrypt(data):
 	keygen(get_password())
 
 	k1, k2, k3, k4 = KEYS["feistel"]
@@ -128,6 +128,7 @@ def feistel_and_mac(data):
 	r2 = enc_hmac_round(r1, k2)
 	r3 = enc_ctr_round(r2, k3)
 	ct = enc_hmac_round(r3, k4)
+
 	mac = hmac.new(mk, ct, hashlib.sha256).hexdigest()
 	METADATA["mac"] = mac
 
@@ -165,16 +166,16 @@ def write_file(file, text):
 
 ################# DECRYPTION ################# 
 
-def decrypt(f):
+def decryptor(f):
 	md = read_metadata(f)
 	validate_password(md, f)
 	ct = read_ciphertext(f)
-	pt = reverse_feistel_and_mac(ct)
+	pt = decrypt(ct)
 	write_file(f, pt)
 	os.remove(get_metadata_file_path(f))
 	
 
-def reverse_feistel_and_mac(data):
+def decrypt(data):
 	k1, k2, k3, k4 = KEYS["feistel"]
 	mk = KEYS["mac"]
 	r1 = hmac_round(data, k4)
