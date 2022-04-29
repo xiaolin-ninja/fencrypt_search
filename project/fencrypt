@@ -31,7 +31,6 @@ def run(args):
 	validate_flags(args)
 
 ################# HELPERS ################# 
-# salt, validator, mac, terms
 METADATA = {}
 KEYS = {}
 
@@ -85,7 +84,7 @@ def xor_bytes(bl, b2):
 
 
 def get_metadata_file_path(file):
-	return Path(file.name).parent / ("/.fenc-meta." + file.name)
+	return Path(file.name).parent / (".fenc-meta." + file.name)
 
 
 def validate_flags(args):
@@ -93,7 +92,7 @@ def validate_flags(args):
 		raise_err("Cannot decrypt and encrypt at the same time.")
 	if args.d:
 		for file in args.d:
-			if not get_metadata_file_path(file).is_file():
+			if not get_metadata_file_path(file).exists():
 				raise_err("Metadata not found for %s. " % file.name + "Program aborted. No files decrypted.")
 			decryptor(file)
 	if args.e:
@@ -187,7 +186,7 @@ def hmac_round(data, key):
 
 
 def write_metadata(file):
-	with open(get_metadata_file_path(file).name, "w") as o:
+	with get_metadata_file_path(file).open("w") as o:
 		json.dump(METADATA, o, indent=4)
 
 
@@ -232,7 +231,7 @@ def read_ciphertext(file):
 
 
 def read_metadata(file):
-	f = Path(get_metadata_file_path(file)).read_bytes()
+	f = get_metadata_file_path(file).read_bytes()
 	return json.loads(f)
 
 
