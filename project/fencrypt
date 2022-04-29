@@ -4,7 +4,6 @@ import getpass
 import sys
 import argparse
 import json
-import os
 import secrets
 import hmac
 import hashlib
@@ -13,19 +12,6 @@ from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import unicodedata
 from pathlib import Path
-
-# -d decryption, followed by file names
-# -e encryption, followed by file names
-# default to encrypt.
-# -s search, only UTF-8 files
-# -j json output
-# take password input
-
-# error if file smaller than 32 bytes
-# PBKDF2 250,000 iterations
-# 32 byte output value
-# create .fenc-meta.<filename> that contains JSON object with:
-## salt, validator, mac, terms <-- JSON list of all search terms, hex encoded.
 
 def run(args):
 	validate_flags(args)
@@ -93,7 +79,7 @@ def validate_flags(args):
 	if args.d:
 		for file in args.d:
 			if not get_metadata_file_path(file).exists():
-				raise_err("Metadata not found for %s. " % file.name + "Program aborted. No files decrypted.")
+				raise_err("Metadata not found for %s. Program aborted. No files decrypted." % file.name)
 			decryptor(file)
 	if args.e:
 		for file in args.e:
@@ -103,7 +89,7 @@ def validate_flags(args):
 
 
 def validate_file(f):
-	if os.path.getsize(f.name) < 32:
+	if Path(f.name).stat().st_size < 32:
 		raise_err("File size must be greater than 32 bytes.")
 
 
@@ -157,17 +143,18 @@ def generate_search_terms(data):
 		for i in range(4, len(w)):
 			terms.append(w[:i]+'*')
 		terms.append(w)
-	terms = normalize(sorted(terms))
-	mac = sorted(mac_terms(terms))
-	METADATA["terms"] = mac
+	terms = [normalize(t) for t in sorted(terms)]
+	macs = [mac_str(t) for t in terms]
+	METADATA["terms"] = sorted(macs)
 
 
-def normalize(terms):
-	return [unicodedata.normalize("NFC", t.casefold()).encode() for t in terms]
+def normalize(s):
+	return unicodedata.normalize("NFC", s.casefold()).encode()
 
 
-def mac_terms(terms):
-	return [hmac.new(KEYS["search_terms"], t, hashlib.sha256).hexdigest() for t in terms]
+def mac_str(s):
+	return hmac.new(KEYS["search_terms"], s, hashlib.sha256).hexdigest()
+
 
 def ctr_round(data, key):
     l = data[:16]
@@ -198,7 +185,8 @@ def write_file(file, text):
 
 def decryptor(f):
 	md = read_metadata(f)
-	validate_password(md, f)
+	if not validate_password(md, get_password()):
+		raise_err("Incorrect password. Unable to decrypt file: %s." % f.name)
 	ct = read_ciphertext(f)
 	pt = decrypt(ct)
 	write_file(f, pt)
@@ -215,16 +203,15 @@ def decrypt(data):
 	return pt
 
 
-def validate_password(metadata, f):
-	password = str.encode(get_password())
+def validate_password(metadata, password):
+	password = str.encode(password)
 	salt = bytes.fromhex(metadata["salt"])
 
 	key = hashlib.pbkdf2_hmac('sha256', password, salt, 250000)
 	kdf(key)
 
-	if metadata["validator"] != METADATA["validator"]:
-		raise_err("Incorrect password. Unable to decrypt file: %s." % f.name)
-
+	return metadata["validator"] == METADATA["validator"]
+		
 
 def read_ciphertext(file):
 	return Path(file.name).read_bytes()
@@ -238,9 +225,14 @@ def read_metadata(file):
 ################### SEARCH ################### 
 
 def search(s):
+	password = get_password()
 	for p in Path.cwd().glob('.fenc-meta.*'):
 		m = json.loads(p.read_bytes())
-		print(m)
+		if not validate_password(m, password):
+			raise_err("Unable to searchfile %s, password invalid." % p)
+		if mac_str(normalize(s)) in m["terms"]:
+			print(p.name.removeprefix(".fenc-meta."))
+
 
 def to_json():
 	print("JSON")
