@@ -14,46 +14,54 @@ import unicodedata
 from pathlib import Path
 
 ################# HELPERS ################# 
-METADATA = {}
-KEYS = {}
+# METADATA = {}
+# KEYS = {}
+# json_output = {}
 
-def log(err):
-	sys.stderr.write(err)
+sys.stdout = sys.stderr
+
+def parse_flags(args):
+	inputs = args.inputs
+	json_flag = False
+	json_output = {}
+
+	if args.d and args.e:
+		raise_err("Cannot decrypt and encrypt at the same time.")
+	if args.j:
+		json_flag = True
+	if args.s:
+		search(inputs[0])
+
+	for fp in inputs:
+		f = Path(fp)
+		check_file_size(f)
+
+		if args.e:
+			if get_metadata_fp(f).exists():
+				raise_err("File: %s is already encrypted. Program aborted." % f)
+			e = Encryptor(f, json_flag)
+			e.encrypt()
+			json_output[fp] = e.key
+		# if args.d:
+		# 	if not get_metadata_file_path(fp).exists():
+		# 		raise_err("Metadata not found for file: %s. Program aborted. No files decrypted." % file)
+		# 	decryptor(f)
+	if json_flag:
+		print(json_output)
 
 def raise_err(err):
-	log("[ERROR] " + err + '\n')
+	print(err)
 	sys.exit(1)
+
 
 def get_password():
     if sys.stdin.isatty():
-        return getpass.getpass("password: ")
+        p = getpass.getpass("password: ")
+        if len(p) < 1:
+        	raise_err("Please enter a password.")
+        return p
     else:
         return sys.stdin.readline().strip()
-
-def keygen(password):
-	salt = secrets.token_hex(16)
-	METADATA["salt"] = salt
-	password = str.encode(password)
-	salt = bytes.fromhex(salt)
-	
-	key = hashlib.pbkdf2_hmac('sha256', password, salt, 250000)
-	kdf(key)
-
-
-def kdf(key):
-	aes_key = key[:16]
-	iv = key[16:32]
-
-	ctx = AES.new(aes_key, AES.MODE_ECB)
-	METADATA["validator"] = ctx.encrypt(iv).hex()
-
-	KEYS["feistel"] = [ctx.encrypt(increment(iv, i)) for i in range(1,5)] 
-
-	mac_key = ctx.encrypt(increment(iv,5))
-	KEYS["mac"] = mac_key
-
-	search_key = ctx.encrypt(increment(iv,6))
-	KEYS["search_terms"] = search_key
 
 
 def increment(b, n):
@@ -66,93 +74,102 @@ def xor_bytes(bl, b2):
     return bytes([x ^ y for x, y in zip(bl, b2)])
 
 
-def get_metadata_file_path(file):
-	return Path(file).parent / (".fenc-meta." + file)
+def get_metadata_fp(file):
+	return Path(file).parent / (".fenc-meta." + file.name)
 
 
-def parse_flags(args):
-	inputs = args.inputs
-	if args.d and args.e:
-		raise_err("Cannot decrypt and encrypt at the same time.")
-	if args.d:
-		for file in inputs:
-			if not get_metadata_file_path(file).exists():
-				raise_err("Metadata not found for %s. Program aborted. No files decrypted." % file)
-			decryptor(file)
-	if args.e:
-		for file in inputs:
-			encryptor(file)
-	if args.s:
-		for file in inputs:
-			search(inputs)
-
-
-def validate_file(f):
+def check_file_size(f):
 	if Path(f).stat().st_size < 32:
 		raise_err("File size must be greater than 32 bytes.")
 
 
 ################# ENCRYPTION ################# 
 
-def encryptor(f):
-	validate_file(f)
+class Encryptor:
+	def __init__(self, file, json):
+		self.f = file
+		self.keys = {}
+		self.metadata = {}
+		self.json_flag = json
 
-	try:
-		data = open(f, encoding='utf-8').read()
-		ct = encrypt(data.encode())
-		generate_search_terms(data)
-	except:
-		data = Path(f).read_bytes()
-		ct = encrypt(data)
-
-	write_file(f, ct)
-	write_metadata(f)
-
-
-def encrypt(data):
-	keygen(get_password())
-
-	k1, k2, k3, k4 = KEYS["feistel"]
-	mk = KEYS["mac"]
-	r1 = ctr_round(data, k1)
-	r2 = hmac_round(r1, k2)
-	r3 = ctr_round(r2, k3)
-	ct = hmac_round(r3, k4)
-
-	mac = hmac.new(mk, ct, hashlib.sha256).hexdigest()
-	METADATA["mac"] = mac
-
-	return ct
+	def encrypt(self):
+		self.__keygen(get_password())
+		try:
+			data = self.f.read_text()
+			self.__generate_search_terms(data)
+			data = data.encode()
+		except:
+			data = self.f.read_bytes()
+		ct = self.__encrypt(data)
+		write_metadata(self.f, self.metadata)
+		write_file(self.f, ct)
 
 
-def generate_search_terms(data):
-	categories = ["Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Nd", "Pc"]
-	words = []
-	w = ""
-	for c in data:
-		if unicodedata.category(c) in categories:
-			w += c
-		else:
-			if 4 <= len(w) <= 12 and w not in words:
-				words.append(w)
-			w = ""
+	def __keygen(self, password):
+		salt = secrets.token_hex(16)
+		self.metadata["salt"] = salt
+		password = str.encode(password)
+		salt = bytes.fromhex(salt)
+		key = hashlib.pbkdf2_hmac('sha256', password, salt, 250000)
+		self.key = key.hex()
+		self.__kdf(key)
 
-	terms = []
-	for w in words:
-		for i in range(4, len(w)):
-			terms.append(w[:i]+'*')
-		terms.append(w)
-	terms = [normalize(t) for t in sorted(terms)]
-	macs = [mac_str(t) for t in terms]
-	METADATA["terms"] = sorted(macs)
+
+	def __kdf(self, key):
+		aes_key = key[:16]
+		iv = key[16:32]
+
+		ctx = AES.new(aes_key, AES.MODE_ECB)
+		self.metadata["validator"] = ctx.encrypt(iv).hex()
+		self.keys["feistel"] = [ctx.encrypt(increment(iv, i)) for i in range(1,5)] 
+
+		mac_key = ctx.encrypt(increment(iv,5))
+		self.keys["mac"] = mac_key
+
+		search_key = ctx.encrypt(increment(iv,6))
+		self.keys["search_terms"] = search_key
+
+
+	def __encrypt(self, data):
+		k1, k2, k3, k4 = self.keys["feistel"]
+		mk = self.keys["mac"]
+		r1 = ctr_round(data, k1)
+		r2 = hmac_round(r1, k2)
+		r3 = ctr_round(r2, k3)
+		ct = hmac_round(r3, k4)
+		self.metadata["mac"] = hmac.new(mk, ct, hashlib.sha256).hexdigest()
+		print("Successfully encrypted file: %s" % self.f)
+		return ct
+
+
+	def __generate_search_terms(self, data):
+		categories = dict.fromkeys({"Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Nd", "Pc"})
+		words = []
+		w = ""
+		for c in data:
+			if unicodedata.category(c) in categories:
+				w += c
+			else:
+				if 4 <= len(w) <= 12 and w not in words:
+					words.append(w)
+				w = ""
+
+		terms = []
+		for w in words:
+			for i in range(4, len(w)):
+				terms.append(w[:i]+'*')
+			terms.append(w)
+		terms = [normalize(t) for t in sorted(terms)]
+		macs = [mac_str(self.keys["mac"], t) for t in terms]
+		self.metadata["terms"] = sorted(macs)
 
 
 def normalize(s):
 	return unicodedata.normalize("NFC", s.casefold()).encode()
 
 
-def mac_str(s):
-	return hmac.new(KEYS["search_terms"], s, hashlib.sha256).hexdigest()
+def mac_str(k, s):
+	return hmac.new(k, s, hashlib.sha256).hexdigest()
 
 
 def ctr_round(data, key):
@@ -171,9 +188,13 @@ def hmac_round(data, key):
 	return lout + r
 
 
-def write_metadata(file):
-	with get_metadata_file_path(file).open("w") as o:
-		json.dump(METADATA, o, indent=4)
+def write_metadata(file, metadata):
+	with get_metadata_fp(file).open("w") as o:
+		try:
+			json.dump(metadata, o, indent=4)
+		except:
+			Path.unlink(get_metadata_fp(file))
+			raise_err("Metadata write for file: %s unsuccessful. Encryption aborted." % file)
 
 
 def write_file(file, text):
