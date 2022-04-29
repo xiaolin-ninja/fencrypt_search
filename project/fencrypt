@@ -13,9 +13,6 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import unicodedata
 from pathlib import Path
 
-def run(args):
-	validate_flags(args)
-
 ################# HELPERS ################# 
 METADATA = {}
 KEYS = {}
@@ -70,26 +67,28 @@ def xor_bytes(bl, b2):
 
 
 def get_metadata_file_path(file):
-	return Path(file.name).parent / (".fenc-meta." + file.name)
+	return Path(file).parent / (".fenc-meta." + file)
 
 
-def validate_flags(args):
+def parse_flags(args):
+	inputs = args.inputs
 	if args.d and args.e:
 		raise_err("Cannot decrypt and encrypt at the same time.")
 	if args.d:
-		for file in args.d:
+		for file in inputs:
 			if not get_metadata_file_path(file).exists():
-				raise_err("Metadata not found for %s. Program aborted. No files decrypted." % file.name)
+				raise_err("Metadata not found for %s. Program aborted. No files decrypted." % file)
 			decryptor(file)
 	if args.e:
-		for file in args.e:
+		for file in inputs:
 			encryptor(file)
 	if args.s:
-		search(args.s)
+		for file in inputs:
+			search(inputs)
 
 
 def validate_file(f):
-	if Path(f.name).stat().st_size < 32:
+	if Path(f).stat().st_size < 32:
 		raise_err("File size must be greater than 32 bytes.")
 
 
@@ -99,11 +98,11 @@ def encryptor(f):
 	validate_file(f)
 
 	try:
-		data = open(f.name, encoding='utf-8').read()
+		data = open(f, encoding='utf-8').read()
 		ct = encrypt(data.encode())
 		generate_search_terms(data)
 	except:
-		data = Path(f.name).read_bytes()
+		data = Path(f).read_bytes()
 		ct = encrypt(data)
 
 	write_file(f, ct)
@@ -178,7 +177,7 @@ def write_metadata(file):
 
 
 def write_file(file, text):
-	return Path(file.name).write_bytes(text)
+	return Path(file).write_bytes(text)
 
 
 ################# DECRYPTION ################# 
@@ -186,7 +185,7 @@ def write_file(file, text):
 def decryptor(f):
 	md = read_metadata(f)
 	if not validate_password(md, get_password()):
-		raise_err("Incorrect password. Unable to decrypt file: %s." % f.name)
+		raise_err("Incorrect password. Unable to decrypt file: %s." % f)
 	ct = read_ciphertext(f)
 	pt = decrypt(ct)
 	write_file(f, pt)
@@ -214,7 +213,7 @@ def validate_password(metadata, password):
 		
 
 def read_ciphertext(file):
-	return Path(file.name).read_bytes()
+	return Path(file).read_bytes()
 
 
 def read_metadata(file):
@@ -240,14 +239,14 @@ def to_json():
 ############################################# 
 
 if __name__ == '__main__':
-	parser = argparse.ArgumentParser()
-	# parser.add_argument('filename', metavar='N', type=argparse.FileType('r'))
-	parser.add_argument('-d', nargs='+', type=argparse.FileType('r'), help='decrypt')
-	parser.add_argument('-e', nargs='+', type=argparse.FileType('r'), help='encrypt')
-	parser.add_argument('-s', type=str, help='search')
-	parser.add_argument('-j', help='JSON output')
+	parser = argparse.ArgumentParser(
+	description="Encrypts and decrypts binary and text files. "
+					"Plaintext search on encrypted files.")
+	parser.add_argument('inputs', nargs='+', help='file path or search string')
+	parser.add_argument('-d', action="store_true", help='decrypt')
+	parser.add_argument('-e', action="store_true", help='encrypt')
+	parser.add_argument('-s', action="store_true", help='output to terminal')
+	parser.add_argument('-j', action="store_true", help='JSON output')
 	args = parser.parse_args()
-	open_file = args.d
-	run(args)
-
+	parse_flags(args)
 
