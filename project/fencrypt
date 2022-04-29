@@ -11,7 +11,7 @@ import hashlib
 import re
 from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
+import unicodedata
 from pathlib import Path
 
 # -d decryption, followed by file names
@@ -85,8 +85,7 @@ def xor_bytes(bl, b2):
 
 
 def get_metadata_file_path(file):
-	file = Path(file.name)
-	return str(file.parent) + "/.fenc-metadata." + file.name
+	return Path(file.name).parent / ("/.fenc-meta." + file.name)
 
 
 def validate_flags(args):
@@ -94,16 +93,18 @@ def validate_flags(args):
 		raise_err("Cannot decrypt and encrypt at the same time.")
 	if args.d:
 		for file in args.d:
-			if not Path(get_metadata_file_path(file)).is_file():
+			if not get_metadata_file_path(file).is_file():
 				raise_err("Metadata not found for %s. " % file.name + "Program aborted. No files decrypted.")
 			decryptor(file)
 	if args.e:
 		for file in args.e:
 			encryptor(file)
+	if args.s:
+		search(args.s)
 
 
 def validate_file(f):
-	if len(f.read()) < 32:
+	if os.path.getsize(f.name) < 32:
 		raise_err("File size must be greater than 32 bytes.")
 
 
@@ -112,9 +113,13 @@ def validate_file(f):
 def encryptor(f):
 	validate_file(f)
 
-	data = Path(f.name).read_text()
-	ct = encrypt(data.encode('utf-8'))
-	generate_search_terms(data)
+	try:
+		data = open(f.name, encoding='utf-8').read()
+		ct = encrypt(data.encode())
+		generate_search_terms(data)
+	except:
+		data = Path(f.name).read_bytes()
+		ct = encrypt(data)
 
 	write_file(f, ct)
 	write_metadata(f)
@@ -139,16 +144,31 @@ def encrypt(data):
 def generate_search_terms(data):
 	categories = ["Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Nd", "Pc"]
 	words = []
-	word = ""
+	w = ""
 	for c in data:
 		if unicodedata.category(c) in categories:
-			word += c
+			w += c
 		else:
-			if 4 <= len(word) <= 12 and word not in words:
-				words.append(word)
-			word = ""
-	return sorted(words)
+			if 4 <= len(w) <= 12 and w not in words:
+				words.append(w)
+			w = ""
 
+	terms = []
+	for w in words:
+		for i in range(4, len(w)):
+			terms.append(w[:i]+'*')
+		terms.append(w)
+	terms = normalize(sorted(terms))
+	mac = sorted(mac_terms(terms))
+	METADATA["terms"] = mac
+
+
+def normalize(terms):
+	return [unicodedata.normalize("NFC", t.casefold()).encode() for t in terms]
+
+
+def mac_terms(terms):
+	return [hmac.new(KEYS["search_terms"], t, hashlib.sha256).hexdigest() for t in terms]
 
 def ctr_round(data, key):
     l = data[:16]
@@ -167,12 +187,12 @@ def hmac_round(data, key):
 
 
 def write_metadata(file):
-	with open(get_metadata_file_path(file), "w") as o:
+	with open(get_metadata_file_path(file).name, "w") as o:
 		json.dump(METADATA, o, indent=4)
 
 
 def write_file(file, text):
-	Path(file.name).write_bytes(text)
+	return Path(file.name).write_bytes(text)
 
 
 ################# DECRYPTION ################# 
@@ -183,7 +203,7 @@ def decryptor(f):
 	ct = read_ciphertext(f)
 	pt = decrypt(ct)
 	write_file(f, pt)
-	os.remove(get_metadata_file_path(f))
+	Path.unlink(get_metadata_file_path(f))
 	
 
 def decrypt(data):
@@ -212,15 +232,16 @@ def read_ciphertext(file):
 
 
 def read_metadata(file):
-	f = open(get_metadata_file_path(file))
-	return json.load(f)
+	f = Path(get_metadata_file_path(file)).read_bytes()
+	return json.loads(f)
 
 
 ################### SEARCH ################### 
 
 def search(s):
-	print("SEARCH")
-	print(s)
+	for p in Path.cwd().glob('.fenc-meta.*'):
+		m = json.loads(p.read_bytes())
+		print(m)
 
 def to_json():
 	print("JSON")
