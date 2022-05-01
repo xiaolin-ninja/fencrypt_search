@@ -102,7 +102,7 @@ class Decryptor:
 ################### SEARCH ################### 
 
 class Search:
-	def __init__(self, string, output):
+	def __init__(self, string):
 		self.s = string
 		self.metadata = {}
 		self.keys = {}
@@ -128,29 +128,37 @@ def parse_flags(args):
 	if args.d and args.e:
 		raise_err("Cannot decrypt and encrypt at the same time.")
 
-	for target in inputs:
-		if args.s:
-			if args.d or args.e:
-				raise_err("Cannot decrypt or encrypt and search at the same time.")
-			Search(target).search()
-		else:
-			f = Path(target)
-			validate_file(f)
-			if args.d:
-				if not get_metadata_fp(f).exists():
-					raise_err("Metadata not found for file: %s. Program aborted. No files decrypted." % f)
-				d = Decryptor(f)
-				d.decrypt()
-				json_output[target] = d.key
-			elif args.e or not (args.d or args.e):
-				if get_metadata_fp(f).exists():
-					raise_err("File: %s is already encrypted. Program aborted." % f)
-				e = Encryptor(f)
-				e.encrypt()
-				json_output[target] = e.master_key
-	if args.j:
-		## NOTE:
-		print(json_output, file=sys.stdout)
+	if args.s:
+		if args.d or args.e:
+			raise_err("Cannot decrypt or encrypt and search at the same time.")
+		if len(inputs) > 1:
+			raise_err("Please enter one search string at a time.")
+		Search(inputs[0]).search()
+
+
+	# for target in inputs:
+	# 	if args.s:
+	# 		if args.d or args.e:
+	# 			raise_err("Cannot decrypt or encrypt and search at the same time.")
+	# 		Search(target).search()
+	# 	else:
+	# 		f = Path(target)
+	# 		validate_file(f)
+	# 		if args.d:
+	# 			if not get_metadata_fp(f).exists():
+	# 				raise_err("Metadata not found for file: %s. Program aborted. No files decrypted." % f)
+	# 			d = Decryptor(f)
+	# 			d.decrypt()
+	# 			json_output[target] = d.key
+	# 		elif args.e or not (args.d or args.e):
+	# 			if get_metadata_fp(f).exists():
+	# 				raise_err("File: %s is already encrypted. Program aborted." % f)
+	# 			e = Encryptor(f)
+	# 			e.encrypt()
+	# 			json_output[target] = e.master_key
+	# if args.j:
+	# 	## NOTE:
+	# 	print(json_output, file=sys.stdout)
 
 
 def raise_err(err):
