@@ -20,7 +20,6 @@ class Encryptor:
 		self.f = file
 		self.keys = {}
 		self.metadata = {}
-		self.master_key = None
 
 	def encrypt(self):
 		try:
@@ -33,10 +32,6 @@ class Encryptor:
 			self.metadata["terms"] = []
 		write_metadata(self.f, self.metadata)
 		write_file(self.f, ct)
-
-	def get_master_key(self):
-		keygen(self)
-		return self.master_key
 
 	def __encrypt(self, data):
 		k1, k2, k3, k4 = self.keys["feistel"]
@@ -92,11 +87,6 @@ class Decryptor:
 		write_file(self.f, pt)
 		Path.unlink(get_metadata_fp(self.f))
 
-	def get_master_key(self):
-		self.metadata = read_metadata(self.f)
-		keygen(self)
-		return self.master_key
-
 	def __decrypt(self, data):
 		k1, k2, k3, k4 = self.keys["feistel"]
 		mk = self.keys["mac"]
@@ -147,12 +137,11 @@ def parse_flags(args):
 		queue = []
 		for fp in inputs:
 			f = Path(fp)
-			if get_metadata_fp(f).exists():
-				raise_err("File: %s is already encrypted. Program aborted." % f)
+			validate_file(f)
 			e = Encryptor(f)
-			key = e.get_master_key()
+			master_key = generate_keys(e)["master"]
 			queue.append(e)
-			json_output[fp] = key
+			json_output[fp] = master_key
 		if args.j:
 			print(json_output, file=sys.stdout)
 		for job in queue:
@@ -168,8 +157,8 @@ def parse_flags(args):
 			else:
 				d = Decryptor(f)
 				queue.append(d)
-				key = d.get_master_key()
-				json_output[fp] = key
+				master_key = generate_keys(d)["master"]
+				json_output[fp] = master_key
 		if invalid_files:
 			raise_err("Metadata not found for: %s. No files decrypted." % invalid_files)
 		if args.j:
@@ -193,31 +182,38 @@ def get_password():
         return sys.stdin.readline().strip()
 
 
-def validate_password(op):
-	return op.metadata["validator"] == get_validator(op.master_key)
+def validate_password(job):
+	return job.metadata["validator"] == job.keys["validator"]
 
 
-def keygen(op):
-	salt = op.metadata.get("salt")
-	if not salt:
-		salt = secrets.token_hex(16)
-		op.metadata["salt"] = salt
-	salt = bytes.fromhex(salt)
+def generate_keys(job):
+	if type(job) != Encryptor:
+		job.metadata = read_metadata(job.f)
+	keygen(job)
+	return job.keys
+
+
+def keygen(job):
+	if type(job) == Encryptor:
+		job.metadata["salt"] = secrets.token_hex(16)
+	salt = bytes.fromhex(job.metadata["salt"])
 	password = get_password().encode()
 	key = hashlib.pbkdf2_hmac('sha256', password, salt, 250000)
-	op.master_key = key.hex()
-	kdf(op, key)
+	job.keys["master"] = key.hex()
+	kdf(job, key)
 
-def kdf(op, key):
+
+def kdf(job, key):
 	aes_key = key[:16]
 	iv = key[16:32]
 	ctx = AES.new(aes_key, AES.MODE_ECB)
-	op.metadata["validator"] = ctx.encrypt(iv).hex()
-	op.keys["feistel"] = [ctx.encrypt(increment(iv, i)) for i in range(1,5)] 
-	mac_key = ctx.encrypt(increment(iv,5))
-	op.keys["mac"] = mac_key
-	search_key = ctx.encrypt(increment(iv,6))
-	op.keys["search_terms"] = search_key
+	validator = ctx.encrypt(iv).hex()
+	if type(job) == Encryptor:
+		job.metadata["validator"] = validator
+	job.keys["validator"] = validator
+	job.keys["feistel"] = [ctx.encrypt(increment(iv, i)) for i in range(1,5)] 
+	job.keys["mac"] = ctx.encrypt(increment(iv,5))
+	job.keys["search_terms"] = ctx.encrypt(increment(iv,6))
 
 
 def get_validator(key):
@@ -268,10 +264,12 @@ def get_metadata_fp(file):
 
 
 def validate_file(f):
-	if not Path(f).exists():
-		raise_err("File %s does not exist." % f)
-	if Path(f).stat().st_size < 32:
-		raise_err("File size must be greater than 32 bytes. File: %s" % f)
+	if not f.exists():
+		raise_err("[Error] File %s does not exist. No files encrypted." % f)
+	if get_metadata_fp(f).exists():
+		raise_err("[Error] File: %s is already encrypted. No files encrypted." % f)
+	if f.stat().st_size < 32:
+		raise_err("[Error] File: %s is smaller than 32 bytes. No files encrypted." % f)
 
 
 def read_metadata(file):
