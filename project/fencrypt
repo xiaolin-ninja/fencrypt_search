@@ -15,10 +15,11 @@ from pathlib import Path
 ################# ENCRYPTION ################# 
 
 class Encryptor:
-	def __init__(self, file):
+	def __init__(self, file, password):
 		self.f = file
 		self.keys = {}
 		self.metadata = {}
+		self.password = password
 
 	def encrypt(self):
 		try:
@@ -61,7 +62,7 @@ class Encryptor:
 			terms.append(w)
 		macs = []
 		for t in terms:
-			mac = mac_str(self.keys["search_terms"], normalize(t))
+			mac = mac_str(self.keys["search_terms"], t)
 			macs.append(mac)
 		self.metadata["terms"] = sorted(macs)
 
@@ -70,14 +71,15 @@ class Encryptor:
 
 
 class Decryptor:
-	def __init__(self, file):
+	def __init__(self, file, password):
 		self.f = file
 		self.keys = {}
 		self.metadata = {}
+		self.password = password
 
 	def decrypt(self):
 		if not validate_password(self):
-			raise_err("Incorrect password for file: %s. No files decrypted." % self.f)
+			raise_err("Incorrect password. No files decrypted." % self.f)
 		ct = read_file(self.f)
 		if not self.__validate_mac(ct):
 			print("MAC mismatch for: %s, file not decrypted." % self.f)
@@ -103,20 +105,29 @@ class Decryptor:
 
 
 class Search:
-	def __init__(self, string):
-		self.s = string
+	def __init__(self):
 		self.metadata = {}
 		self.keys = {}
 
-	def search(self):
+	def search(self, s, json_flag):
+		self.password = get_password()
+		json_output = {}
+		results = []
 		for p in Path.cwd().glob('.fenc-meta.*'):
-			m = json.loads(p.read_bytes())
-			self.metadata["salt"] = m["salt"]
-			if not validate_password(self):
-				print("Unable to search file %s, password invalid." % p)
-			s = normalize(self.s)
-			if mac_str(self.keys["search_terms"], s) in m["terms"]:
-				print(p.name[len(".fenc-meta."):])
+			self.metadata = json.loads(p.read_bytes())
+			generate_keys(self)
+			f = p.name[len(".fenc-meta."):]
+			if validate_password(self):
+				mac = mac_str(self.keys["search_terms"], s.casefold())
+				if mac in self.metadata["terms"]:
+					results.append(f)
+				json_output[f] = self.keys["master"]
+			else:
+				print("Incorrect password for file %s." % p.name)
+		if args.j:
+			print(json_output)
+		for r in results:
+			print(r)
 
 
 ################# HELPERS ################# 
@@ -134,14 +145,15 @@ def parse_flags(args):
 			raise_err("Cannot decrypt or encrypt and search at the same time.")
 		if len(inputs) > 1:
 			raise_err("Please enter one search string at a time.")
-		Search(inputs[0]).search()
-
-	if args.e or not (args.d or args.e):
+		s = Search()
+		s.search(inputs[0], args.j)
+	elif args.e or not (args.d or args.e):
 		queue = []
+		password = get_password()
 		for fp in inputs:
 			f = Path(fp)
 			validate_file(f)
-			e = Encryptor(f)
+			e = Encryptor(f, password)
 			master_key = generate_keys(e)["master"]
 			queue.append(e)
 			json_output[fp] = master_key
@@ -153,16 +165,16 @@ def parse_flags(args):
 			except Exception as e:
 				print(e)
 				continue
-
-	if args.d:
+	elif args.d:
 		invalid_files = []
 		queue = []
+		password = get_password()
 		for fp in inputs:
 			f = Path(fp)
 			if not get_metadata_fp(f).exists():
 				invalid_files.append(fp)
 			else:
-				d = Decryptor(f)
+				d = Decryptor(f, password)
 				queue.append(d)
 				master_key = generate_keys(d)["master"]
 				json_output[fp] = master_key
@@ -179,9 +191,9 @@ def raise_err(err):
 	sys.exit(1)
 
 
-def get_password(job):
+def get_password():
     if sys.stdin.isatty():
-    	p = getpass.getpass("password %s: " % job.f)
+    	p = getpass.getpass("password: ")
     	if not p:
     		raise_err("Please enter a password.")
     	return p
@@ -194,7 +206,7 @@ def validate_password(job):
 
 
 def generate_keys(job):
-	if type(job) != Encryptor:
+	if type(job) not in (Encryptor, Search):
 		job.metadata = read_metadata(job.f)
 	keygen(job)
 	return job.keys
@@ -204,7 +216,7 @@ def keygen(job):
 	if type(job) == Encryptor:
 		job.metadata["salt"] = secrets.token_hex(16)
 	salt = bytes.fromhex(job.metadata["salt"])
-	password = get_password(job).encode()
+	password = job.password.encode()
 	key = hashlib.pbkdf2_hmac('sha256', password, salt, 250000)
 	job.keys["master"] = key.hex()
 	kdf(job, key)
@@ -263,6 +275,7 @@ def normalize(s):
 
 
 def mac_str(k, s):
+	s = normalize(s)
 	return hmac.new(k, s, hashlib.sha256).hexdigest()
 
 
