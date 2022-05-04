@@ -7,7 +7,6 @@ import json
 import secrets
 import hmac
 import hashlib
-import re
 from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import unicodedata
@@ -24,8 +23,8 @@ class Encryptor:
 	def encrypt(self):
 		try:
 			data = self.f.read_text(encoding='utf-8')
-			self.__generate_search_terms(data)
 			ct = self.__encrypt(data.encode())
+			self.__generate_search_terms(data)
 		except:
 			data = self.f.read_bytes()
 			ct = self.__encrypt(data)
@@ -41,9 +40,7 @@ class Encryptor:
 		r3 = ctr_round(r2, k3)
 		ct = hmac_round(r3, k4)
 		self.metadata["mac"] = hmac.new(mk, ct, hashlib.sha256).hexdigest()
-		print("Successfully encrypted file: %s" % self.f)
 		return ct
-
 
 	def __generate_search_terms(self, data):
 		categories = dict.fromkeys({"Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Nd", "Pc"})
@@ -56,48 +53,54 @@ class Encryptor:
 				if 4 <= len(w) <= 12 and w not in words:
 					words.append(w)
 				w = ""
-
 		terms = []
 		for w in words:
+			w = w.casefold()
 			for i in range(4, len(w)):
-				terms.append(w[:i]+'*')
+				terms.append(w[:i]+"*")
 			terms.append(w)
-
 		macs = []
 		for t in terms:
 			mac = mac_str(self.keys["search_terms"], normalize(t))
 			macs.append(mac)
-
 		self.metadata["terms"] = sorted(macs)
 
+		
 ################# DECRYPTION ################# 
+
 
 class Decryptor:
 	def __init__(self, file):
 		self.f = file
 		self.keys = {}
 		self.metadata = {}
-		self.master_key = None
 
 	def decrypt(self):
 		if not validate_password(self):
-			raise_err("Incorrect password. Unable to decrypt file: %s." % self.f)
+			raise_err("Incorrect password for file: %s. No files decrypted." % self.f)
 		ct = read_file(self.f)
+		if not self.__validate_mac(ct):
+			print("MAC mismatch for: %s, file not decrypted." % self.f)
+			return
 		pt = self.__decrypt(ct)
 		write_file(self.f, pt)
+		print("Successfully decrypted file: %s" % self.f)
 		Path.unlink(get_metadata_fp(self.f))
 
 	def __decrypt(self, data):
 		k1, k2, k3, k4 = self.keys["feistel"]
-		mk = self.keys["mac"]
 		r1 = hmac_round(data, k4)
 		r2 = ctr_round(r1, k3)
 		r3 = hmac_round(r2, k2)
 		pt = ctr_round(r3, k1)
-		print("Successfully decrypted file: %s" % self.f)
 		return pt
 
+	def __validate_mac(self, ct):
+		return self.metadata["mac"] == hmac.new(self.keys["mac"], ct, hashlib.sha256).hexdigest()
+
+
 ################### SEARCH ################### 
+
 
 class Search:
 	def __init__(self, string):
@@ -145,7 +148,11 @@ def parse_flags(args):
 		if args.j:
 			print(json_output, file=sys.stdout)
 		for job in queue:
-			job.encrypt()
+			try:
+				job.encrypt()
+			except Exception as e:
+				print(e)
+				continue
 
 	if args.d:
 		invalid_files = []
@@ -172,9 +179,9 @@ def raise_err(err):
 	sys.exit(1)
 
 
-def get_password():
+def get_password(job):
     if sys.stdin.isatty():
-    	p = getpass.getpass("password: ")
+    	p = getpass.getpass("password %s: " % job.f)
     	if not p:
     		raise_err("Please enter a password.")
     	return p
@@ -197,7 +204,7 @@ def keygen(job):
 	if type(job) == Encryptor:
 		job.metadata["salt"] = secrets.token_hex(16)
 	salt = bytes.fromhex(job.metadata["salt"])
-	password = get_password().encode()
+	password = get_password(job).encode()
 	key = hashlib.pbkdf2_hmac('sha256', password, salt, 250000)
 	job.keys["master"] = key.hex()
 	kdf(job, key)
@@ -252,7 +259,7 @@ def hmac_round(data, key):
 
 
 def normalize(s):
-	return unicodedata.normalize("NFC", s.casefold()).encode('utf-8')
+	return unicodedata.normalize("NFC", s).encode('utf-8')
 
 
 def mac_str(k, s):
@@ -265,11 +272,11 @@ def get_metadata_fp(file):
 
 def validate_file(f):
 	if not f.exists():
-		raise_err("[Error] File %s does not exist. No files encrypted." % f)
+		raise_err("File %s does not exist. No files encrypted." % f)
 	if get_metadata_fp(f).exists():
-		raise_err("[Error] File: %s is already encrypted. No files encrypted." % f)
+		raise_err("File %s is already encrypted. No files encrypted." % f)
 	if f.stat().st_size < 32:
-		raise_err("[Error] File: %s is smaller than 32 bytes. No files encrypted." % f)
+		raise_err("File %s is smaller than 32 bytes. No files encrypted." % f)
 
 
 def read_metadata(file):
@@ -284,8 +291,7 @@ def write_metadata(file, metadata):
 			json.dump(metadata, o, indent=4)
 		except:
 			Path.unlink(path)
-			raise_err("Metadata write for file: %s unsuccessful. Encryption aborted." % file)
-
+			raise Exception("Metadata write for file: %s unsuccessful. File not encrypted." % file)
 
 def read_file(file):
 	return Path(file).read_bytes()
