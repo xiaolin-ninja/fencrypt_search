@@ -79,14 +79,14 @@ class Decryptor:
 
 	def decrypt(self):
 		if not validate_password(self):
-			raise_err("Incorrect password. No files decrypted." % self.f)
+			raise_err("Incorrect password. No files decrypted.")
 		ct = read_file(self.f)
 		if not self.__validate_mac(ct):
-			print("MAC mismatch for: %s, file not decrypted." % self.f)
+			print("MAC mismatch for: %s, file not decrypted." % self.f, file=sys.stdout)
 			return
 		pt = self.__decrypt(ct)
 		write_file(self.f, pt)
-		print("Successfully decrypted file: %s" % self.f)
+		print("Successfully decrypted file: %s" % self.f, file=sys.stderr)
 		Path.unlink(get_metadata_fp(self.f))
 
 	def __decrypt(self, data):
@@ -105,12 +105,12 @@ class Decryptor:
 
 
 class Search:
-	def __init__(self):
+	def __init__(self, password):
 		self.metadata = {}
 		self.keys = {}
+		self.password = password
 
 	def search(self, s, json_flag):
-		self.password = get_password()
 		json_output = {}
 		results = []
 		for p in Path.cwd().glob('.fenc-meta.*'):
@@ -118,16 +118,19 @@ class Search:
 			generate_keys(self)
 			f = p.name[len(".fenc-meta."):]
 			if validate_password(self):
-				mac = mac_str(self.keys["search_terms"], s.casefold())
-				if mac in self.metadata["terms"]:
+				mac_term = mac_str(self.keys["search_terms"], s.casefold())
+				if mac_term in self.metadata["terms"]:
 					results.append(f)
 				json_output[f] = self.keys["master"]
 			else:
-				print("Incorrect password for file %s." % p.name)
+				print("Incorrect password for file %s." % p.name, file=sys.stderr)
+				continue
 		if args.j:
-			print(json_output)
+			print(json.dumps(json_output, indent=4), file=sys.stdout)
+		if not results:
+			raise_err("No files found containing string: %s." % s)
 		for r in results:
-			print(r)
+			print(r, file=sys.stdout)
 
 
 ################# HELPERS ################# 
@@ -143,13 +146,18 @@ def parse_flags(args):
 	if args.s:
 		if args.d or args.e:
 			raise_err("Cannot decrypt or encrypt and search at the same time.")
-		if len(inputs) > 1:
-			raise_err("Please enter one search string at a time.")
-		s = Search()
-		s.search(inputs[0], args.j)
+		password = get_password()
+		s = Search(password)
+		for string in inputs:
+			try:
+				s.search(string, args.j)
+			except:
+				pass
+
 	elif args.e or not (args.d or args.e):
 		queue = []
 		password = get_password()
+		
 		for fp in inputs:
 			f = Path(fp)
 			validate_file(f)
@@ -158,47 +166,56 @@ def parse_flags(args):
 			queue.append(e)
 			json_output[fp] = master_key
 		if args.j:
-			print(json_output, file=sys.stdout)
+			print(json.dumps(json_output, indent=4), file=sys.stdout)
 		for job in queue:
 			try:
 				job.encrypt()
 			except Exception as e:
-				print(e)
+				print(e, file=sys.stderr)
 				continue
+
 	elif args.d:
 		invalid_files = []
+		missing_files = []
 		queue = []
-		password = get_password()
 		for fp in inputs:
 			f = Path(fp)
+			if not f.exists():
+				missing_files.append(fp)
 			if not get_metadata_fp(f).exists():
 				invalid_files.append(fp)
 			else:
-				d = Decryptor(f, password)
-				queue.append(d)
-				master_key = generate_keys(d)["master"]
-				json_output[fp] = master_key
+				queue.append(f)
 		if invalid_files:
 			raise_err("Metadata not found for: %s. No files decrypted." % invalid_files)
+		if missing_files:
+			raise_err("File not found: %s. No files decrypted." % missing_files)
+
+		password = get_password()
+		for i, f in enumerate(queue):
+			d = Decryptor(f, password)
+			master_key = generate_keys(d)["master"]
+			queue[i] = d
+			json_output[fp] = master_key
 		if args.j:
-			print(json_output, file=sys.stdout)
+			print(json.dumps(json_output, indent=4), file=sys.stdout)
 		for job in queue:
 			job.decrypt()
 
 
 def raise_err(err):
-	print(err)
+	print(err, file=sys.stderr)
 	sys.exit(1)
 
 
 def get_password():
-    if sys.stdin.isatty():
-    	p = getpass.getpass("password: ")
-    	if not p:
-    		raise_err("Please enter a password.")
-    	return p
-    else:
-        return sys.stdin.readline().strip()
+	if sys.stdin.isatty():
+		p = getpass.getpass("password: ")
+	else:
+		p = sys.stdin.readline().strip()
+	if not p:
+		raise_err("Please enter a password.")
+	return p
 
 
 def validate_password(job):
@@ -206,7 +223,7 @@ def validate_password(job):
 
 
 def generate_keys(job):
-	if type(job) not in (Encryptor, Search):
+	if type(job) == Decryptor:
 		job.metadata = read_metadata(job.f)
 	keygen(job)
 	return job.keys
@@ -233,15 +250,6 @@ def kdf(job, key):
 	job.keys["feistel"] = [ctx.encrypt(increment(iv, i)) for i in range(1,5)] 
 	job.keys["mac"] = ctx.encrypt(increment(iv,5))
 	job.keys["search_terms"] = ctx.encrypt(increment(iv,6))
-
-
-def get_validator(key):
-	key = bytes.fromhex(key)
-	aes_key = key[:16]
-	iv = key[16:32]
-
-	ctx = AES.new(aes_key, AES.MODE_ECB)
-	return ctx.encrypt(iv).hex()
 
 
 def increment(b, n):
@@ -317,8 +325,6 @@ def write_file(file, text):
 ############################################# 
 
 if __name__ == '__main__':
-	sys.stdout = sys.stderr
-
 	parser = argparse.ArgumentParser(
 	description="Encrypts and decrypts binary and text files. "
 					"Plaintext search on encrypted files.")
