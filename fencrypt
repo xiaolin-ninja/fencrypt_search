@@ -4,70 +4,263 @@ import getpass
 import sys
 import argparse
 import json
-import os
 import secrets
 import hmac
 import hashlib
 from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
+import unicodedata
 from pathlib import Path
 
-# -d decryption, followed by file names
-# -e encryption, followed by file names
-# default to encrypt.
-# -s search, only UTF-8 files
-# -j json output
-# take password input
+################# ENCRYPTION ################# 
 
-# error if file smaller than 32 bytes
-# PBKDF2 250,000 iterations
-# 32 byte output value
-# create .fenc-meta.<filename> that contains JSON object with:
-## salt, validator, mac, terms <-- JSON list of all search terms, hex encoded.
+class Encryptor:
+	def __init__(self, file, password):
+		self.f = file
+		self.keys = {}
+		self.metadata = {}
+		self.password = password
 
-def run(args):
-	validate_flags(args)
+	def encrypt(self):
+		data = self.f.read_bytes()
+		ct = self.__encrypt(data)
+		try:
+			self.__generate_search_terms(data.decode())
+		except:
+			self.metadata["terms"] = []
+		write_metadata(self.f, self.metadata)
+		write_file(self.f, ct)
+
+	def __encrypt(self, data):
+		k1, k2, k3, k4 = self.keys["feistel"]
+		mk = self.keys["mac"]
+		r1 = ctr_round(data, k1)
+		r2 = hmac_round(r1, k2)
+		r3 = ctr_round(r2, k3)
+		ct = hmac_round(r3, k4)
+		self.metadata["mac"] = hmac.new(mk, ct, hashlib.sha256).hexdigest()
+		return ct
+
+	def __generate_search_terms(self, data):
+		categories = dict.fromkeys({"Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Nd", "Pc"})
+		words = []
+		w = ""
+		for c in data:
+			if unicodedata.category(c) in categories:
+				w += c
+			else:
+				if 4 <= len(w) <= 12 and w not in words:
+					words.append(w)
+				w = ""
+		terms = []
+		for w in words:
+			for i in range(4, len(w)):
+				terms.append(w[:i]+"*")
+			terms.append(w)
+		macs = []
+		for t in terms:
+			mac = mac_str(self.keys["search_terms"], t)
+			macs.append(mac)
+		self.metadata["terms"] = sorted(macs)
+
+		
+################# DECRYPTION ################# 
+
+
+class Decryptor:
+	def __init__(self, file, password):
+		self.f = file
+		self.keys = {}
+		self.metadata = {}
+		self.password = password
+
+	def decrypt(self):
+		if not validate_password(self):
+			raise_err("Incorrect password. No files decrypted.")
+		ct = read_file(self.f)
+		if not self.__validate_mac(ct):
+			print("MAC mismatch for: %s, file not decrypted." % self.f, file=sys.stdout)
+			return
+		pt = self.__decrypt(ct)
+		write_file(self.f, pt)
+		print("Successfully decrypted file: %s" % self.f, file=sys.stderr)
+		Path.unlink(get_metadata_fp(self.f))
+
+	def __decrypt(self, data):
+		k1, k2, k3, k4 = self.keys["feistel"]
+		r1 = hmac_round(data, k4)
+		r2 = ctr_round(r1, k3)
+		r3 = hmac_round(r2, k2)
+		pt = ctr_round(r3, k1)
+		return pt
+
+	def __validate_mac(self, ct):
+		return self.metadata["mac"] == hmac.new(self.keys["mac"], ct, hashlib.sha256).hexdigest()
+
+
+################### SEARCH ################### 
+
+
+class Search:
+	def __init__(self, password, files):
+		self.metadata = {}
+		self.keys = {}
+		self.password = password
+		self.files = files
+
+	def search(self, s, json_flag):
+		json_output = {}
+		results = []
+		password_matches = 0
+		for p in self.files:
+			self.metadata = json.loads(p.read_bytes())
+			generate_keys(self)
+			f = p.name[len(".fenc-meta."):]
+			if validate_password(self):
+				password_matches += 1
+				mac_term = mac_str(self.keys["search_terms"], s)
+				if mac_term in self.metadata["terms"]:
+					results.append(f)
+				json_output[f] = self.keys["master"]
+			else:
+				print("Incorrect password for file %s." % p.name, file=sys.stderr)
+				continue
+		if not password_matches:
+			raise Exception("No files match password.")
+		if args.j:
+			print(json.dumps(json_output, indent=4), file=sys.stdout)
+		for r in results:
+			print(r, file=sys.stdout)
+
 
 ################# HELPERS ################# 
-# salt, validator, mac, terms
-METADATA = {}
-KEYS = {}
 
-def log(err):
-	sys.stderr.write(err)
+
+def parse_flags(args):
+	inputs = args.inputs
+	json_output = {}
+
+	if args.d and args.e:
+		raise_err("Cannot decrypt and encrypt at the same time.")
+
+	if args.s:
+		if args.d or args.e:
+			raise_err("Cannot decrypt or encrypt and search at the same time.")
+
+		metadata_files = list(Path.cwd().glob('.fenc-meta.*'))
+		if len(metadata_files) < 1:
+			raise_err("No metadata files found.")
+
+		password = get_password()
+		s = Search(password, metadata_files)
+		errors = 0
+		for string in inputs:
+			try:
+				s.search(string, args.j)
+			except:
+				errors += 1
+		if errors:
+			sys.exit(1)
+
+	elif args.e or not (args.d or args.e):
+		queue = []
+		password = get_password()
+		
+		for fp in inputs:
+			f = Path(fp)
+			validate_file(f)
+			e = Encryptor(f, password)
+			master_key = generate_keys(e)["master"]
+			queue.append(e)
+			json_output[fp] = master_key
+		if args.j:
+			print(json.dumps(json_output, indent=4), file=sys.stdout)
+		for job in queue:
+			try:
+				job.encrypt()
+			except Exception as e:
+				print(e, file=sys.stderr)
+				continue
+
+	elif args.d:
+		invalid_files = []
+		missing_files = []
+		queue = []
+		for fp in inputs:
+			f = Path(fp)
+			if not f.exists():
+				missing_files.append(fp)
+			if not get_metadata_fp(f).exists():
+				invalid_files.append(fp)
+			else:
+				queue.append(f)
+		if invalid_files:
+			raise_err("Metadata not found for: %s. No files decrypted." % invalid_files)
+		if missing_files:
+			raise_err("File not found: %s. No files decrypted." % missing_files)
+
+		password = get_password()
+		for i, f in enumerate(queue):
+			d = Decryptor(f, password)
+			master_key = generate_keys(d)["master"]
+			queue[i] = d
+			json_output[fp] = master_key
+		if args.j:
+			print(json.dumps(json_output, indent=4), file=sys.stdout)
+		for job in queue:
+			job.decrypt()
+
 
 def raise_err(err):
-	log(err + '\n')
+	print(err, file=sys.stderr)
+	sys.exit(1)
+
 
 def get_password():
-    if sys.stdin.isatty():
-        return getpass.getpass("password: ")
-    else:
-        return sys.stdin.readline().strip()
+	if sys.stdin.isatty():
+		p = getpass.getpass("password: ")
+	else:
+		p = sys.stdin.readline().strip()
+	if not p:
+		raise_err("Please enter a password.")
+	return p
 
-def keygen(password):
-	salt = secrets.token_hex(16)
-	METADATA["salt"] = salt
 
-	password = str.encode(password)
-	salt = bytes.fromhex(salt)
-	
+def validate_password(job):
+	return job.metadata["validator"] == job.keys["validator"]
+
+
+def generate_keys(job):
+	if type(job) == Decryptor:
+		job.metadata = read_metadata(job.f)
+	keygen(job)
+	return job.keys
+
+
+def keygen(job):
+	if type(job) == Encryptor:
+		job.metadata["salt"] = secrets.token_hex(16)
+	salt = bytes.fromhex(job.metadata["salt"])
+	password = job.password.encode()
 	key = hashlib.pbkdf2_hmac('sha256', password, salt, 250000)
+	job.keys["master"] = key.hex()
+	kdf(job, key)
 
+
+def kdf(job, key):
 	aes_key = key[:16]
 	iv = key[16:32]
-
 	ctx = AES.new(aes_key, AES.MODE_ECB)
-	METADATA["validator"] = ctx.encrypt(iv).hex()
-
-	KEYS["feistel"] = [ctx.encrypt(increment(iv, i)) for i in range(1,5)] 
-
-	mac_key = ctx.encrypt(increment(iv,5))
-	KEYS["mac"] = mac_key
-
-	search_key = ctx.encrypt(increment(iv,6))
-	KEYS["search_terms"] = search_key
+	validator = ctx.encrypt(iv).hex()
+	if type(job) == Encryptor:
+		job.metadata["validator"] = validator
+	job.keys["validator"] = validator
+	try:
+		job.keys["feistel"] = [ctx.encrypt(increment(iv, i)) for i in range(1,5)] 
+		job.keys["mac"] = ctx.encrypt(increment(iv,5))
+		job.keys["search_terms"] = ctx.encrypt(increment(iv,6))
+	except:
+		return
 
 
 def increment(b, n):
@@ -80,65 +273,12 @@ def xor_bytes(bl, b2):
     return bytes([x ^ y for x, y in zip(bl, b2)])
 
 
-def validate_flags(args):
-	if args.d and args.e:
-		raise_err("Cannot decrypt and encrypt at the same time.")
-		sys.exit(1)
-	if args.d:
-		for file in args.d:
-			decrypt(file)
-	if args.e:
-		for file in args.e:
-			encrypt(file)
-
-
-def validate_file(f):
-	if len(f.read()) < 32:
-		raise_err("File size must be greater than 32 bytes.")
-		sys.exit(1)
-
-
-################# ENCRYPTION ################# 
-
-def encrypt(f):
-	# 4 rounds unbalanced Feistel
-	# 1 & 3 CTR, initial counter 16 bytes on the left side. Gen keystream, XOR right side.
-	# 2 & 4 HMAC. HMAC right side, XOR first 16 with left side.
-	validate_file(f)
-
-	data = Path(f.name).read_bytes()
-	ct = feistel_and_mac(data)
-	generate_search_terms(data)
-
-	write_ciphertext(f, ct)
-	write_metadata(f)
-
-
-def feistel_and_mac(data):
-	keygen(get_password())
-
-	k1, k2, k3, k4 = KEYS["feistel"]
-	mk = KEYS["mac"]
-	r1 = aes_ctr_round(data, k1)
-	r2 = hmac_round(r1, k2)
-	r3 = aes_ctr_round(r2, k3)
-	ct = hmac_round(r3, k4)
-	mac = hmac.new(mk, ct, hashlib.sha256).hexdigest()
-	METADATA["mac"] = mac
-
-	return ct
-
-
-def generate_search_terms(data):
-	print("\n", data, "\n")
-
-
-def aes_ctr_round(data, key):
-    l = data[:16]
-    r = data[16:]
-    ks = Cipher(algorithms.AES(key), modes.CTR(l)).encryptor().update(b"\x00" * len(r))
-    rout = xor_bytes(ks, r)
-    return l + rout
+def ctr_round(data, key):
+	l = data[:16]
+	r = data[16:]
+	ks = Cipher(algorithms.AES(key), modes.CTR(l)).encryptor().update(b"\x00" * len(r))
+	rout = xor_bytes(ks, r)
+	return l + rout
 
 
 def hmac_round(data, key):
@@ -149,77 +289,60 @@ def hmac_round(data, key):
 	return lout + r
 
 
-def write_metadata(file):
-	file = Path(file.name)
-	with open(file.parent / (".fenc-metadata." + file.name), "w") as o:
-		json.dump(METADATA, o, indent=4)
+def normalize(s):
+	return unicodedata.normalize("NFC", s).encode('utf-8')
 
 
-def write_ciphertext(file, ciphertext):
-	Path(file.name).write_bytes(ciphertext)
+def mac_str(k, s):
+	s = normalize(s.casefold())
+	return hmac.new(k, s, hashlib.sha256).hexdigest()
 
 
-################# DECRYPTION ################# 
-
-def decrypt(f):
-	md = read_metadata(f)
-	if not md:
-		return False
-	if not validate_password(md):
-		log("Incorrect password. Unable to decrypt file: %s." % f.name)
-
-	ct = read_ciphertext(f)
-	
-
-def validate_password(metadata):
-	password = str.encode(get_password())
-	salt = bytes.fromhex(metadata["salt"])
-
-	key = hashlib.pbkdf2_hmac('sha256', password, salt, 250000)
-	aes_key = key[:16]
-	iv = key[16:32]
-	ctx = AES.new(aes_key, AES.MODE_ECB)
-	validator = ctx.encrypt(iv).hex()
-
-	if metadata["validator"] != validator:
-		raise_err("Incorrect password. Unable to decrypt file: %s." % f.name)
-		return False
+def get_metadata_fp(file):
+	return Path(file).parent / (".fenc-meta." + file.name)
 
 
-def read_ciphertext(file):
-	return Path(file.name).read_bytes()
+def validate_file(f):
+	if not f.exists():
+		raise_err("File %s does not exist. No files encrypted." % f)
+	if get_metadata_fp(f).exists():
+		raise_err("File %s is already encrypted. No files encrypted." % f)
+	if f.stat().st_size < 32:
+		raise_err("File %s is smaller than 32 bytes. No files encrypted." % f)
 
 
 def read_metadata(file):
-	file = Path(file.name)
-	try: 
-		f = open(file.parent / (".fenc-metadata." + file.name))
-	except:
-		raise_err("No encryption metadata found for '%s'" % file.name)
-		return false
-	return json.load(f)
+	f = get_metadata_fp(file).read_bytes()
+	return json.loads(f)
 
 
-################### SEARCH ################### 
+def write_metadata(file, metadata):
+	path = get_metadata_fp(file)
+	with path.open("w") as o:
+		try:
+			json.dump(metadata, o, indent=4)
+		except:
+			Path.unlink(path)
+			raise Exception("Metadata write for file: %s unsuccessful. File not encrypted." % file)
 
-def search(s):
-	print("SEARCH")
-	print(s)
+def read_file(file):
+	return Path(file).read_bytes()
 
-def to_json():
-	print("JSON")
+
+def write_file(file, text):
+	return Path(file).write_bytes(text)
+
 
 ############################################# 
 
 if __name__ == '__main__':
-	parser = argparse.ArgumentParser()
-	# parser.add_argument('filename', metavar='N', type=argparse.FileType('r'))
-	parser.add_argument('-d', nargs='+', type=argparse.FileType('r'), help='decrypt')
-	parser.add_argument('-e', nargs='+', type=argparse.FileType('r'), help='encrypt')
-	parser.add_argument('-s', type=str, help='search')
-	parser.add_argument('-j', help='JSON output')
+	parser = argparse.ArgumentParser(
+	description="Encrypts and decrypts binary and text files. "
+					"Plaintext search on encrypted files.")
+	parser.add_argument('inputs', nargs='+', help='file path or search string')
+	parser.add_argument('-d', action="store_true", help='decrypt')
+	parser.add_argument('-e', action="store_true", help='encrypt')
+	parser.add_argument('-s', action="store_true", help='search')
+	parser.add_argument('-j', action="store_true", help='output master key to terminal')
 	args = parser.parse_args()
-	open_file = args.d
-	run(args)
-
-
+	parse_flags(parser.parse_args())
