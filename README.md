@@ -271,3 +271,7 @@ The salt, validator, mac, and hashed search terms are stored in a per-file gener
 ![Encryption Diagram](./encrypt.png)
 
 </details>
+
+#### Note:
+
+This program is my final project for the "Applied Cryptography" course in the New York University Masters of Science in Cybersecurity program, Spring 2022.
