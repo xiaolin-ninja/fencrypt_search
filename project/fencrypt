@@ -22,13 +22,11 @@ class Encryptor:
 		self.password = password
 
 	def encrypt(self):
+		data = self.f.read_bytes()
+		ct = self.__encrypt(data)
 		try:
-			data = self.f.read_text(encoding='utf-8')
-			ct = self.__encrypt(data.encode())
-			self.__generate_search_terms(data)
+			self.__generate_search_terms(data.decode())
 		except:
-			data = self.f.read_bytes()
-			ct = self.__encrypt(data)
 			self.metadata["terms"] = []
 		write_metadata(self.f, self.metadata)
 		write_file(self.f, ct)
@@ -56,7 +54,6 @@ class Encryptor:
 				w = ""
 		terms = []
 		for w in words:
-			w = w.casefold()
 			for i in range(4, len(w)):
 				terms.append(w[:i]+"*")
 			terms.append(w)
@@ -105,30 +102,33 @@ class Decryptor:
 
 
 class Search:
-	def __init__(self, password):
+	def __init__(self, password, files):
 		self.metadata = {}
 		self.keys = {}
 		self.password = password
+		self.files = files
 
 	def search(self, s, json_flag):
 		json_output = {}
 		results = []
-		for p in Path.cwd().glob('.fenc-meta.*'):
+		password_matches = 0
+		for p in self.files:
 			self.metadata = json.loads(p.read_bytes())
 			generate_keys(self)
 			f = p.name[len(".fenc-meta."):]
 			if validate_password(self):
-				mac_term = mac_str(self.keys["search_terms"], s.casefold())
+				password_matches += 1
+				mac_term = mac_str(self.keys["search_terms"], s)
 				if mac_term in self.metadata["terms"]:
 					results.append(f)
 				json_output[f] = self.keys["master"]
 			else:
 				print("Incorrect password for file %s." % p.name, file=sys.stderr)
 				continue
+		if not password_matches:
+			raise Exception("No files match password.")
 		if args.j:
 			print(json.dumps(json_output, indent=4), file=sys.stdout)
-		if not results:
-			raise_err("No files found containing string: %s." % s)
 		for r in results:
 			print(r, file=sys.stdout)
 
@@ -146,13 +146,21 @@ def parse_flags(args):
 	if args.s:
 		if args.d or args.e:
 			raise_err("Cannot decrypt or encrypt and search at the same time.")
+
+		metadata_files = list(Path.cwd().glob('.fenc-meta.*'))
+		if len(metadata_files) < 1:
+			raise_err("No metadata files found.")
+
 		password = get_password()
-		s = Search(password)
+		s = Search(password, metadata_files)
+		errors = 0
 		for string in inputs:
 			try:
 				s.search(string, args.j)
 			except:
-				pass
+				errors += 1
+		if errors:
+			sys.exit(1)
 
 	elif args.e or not (args.d or args.e):
 		queue = []
@@ -247,9 +255,12 @@ def kdf(job, key):
 	if type(job) == Encryptor:
 		job.metadata["validator"] = validator
 	job.keys["validator"] = validator
-	job.keys["feistel"] = [ctx.encrypt(increment(iv, i)) for i in range(1,5)] 
-	job.keys["mac"] = ctx.encrypt(increment(iv,5))
-	job.keys["search_terms"] = ctx.encrypt(increment(iv,6))
+	try:
+		job.keys["feistel"] = [ctx.encrypt(increment(iv, i)) for i in range(1,5)] 
+		job.keys["mac"] = ctx.encrypt(increment(iv,5))
+		job.keys["search_terms"] = ctx.encrypt(increment(iv,6))
+	except:
+		return
 
 
 def increment(b, n):
@@ -283,7 +294,7 @@ def normalize(s):
 
 
 def mac_str(k, s):
-	s = normalize(s)
+	s = normalize(s.casefold())
 	return hmac.new(k, s, hashlib.sha256).hexdigest()
 
 
