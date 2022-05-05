@@ -254,6 +254,8 @@ aeschylus.txt
 
 </details>
 
+### Summary
+
 When encrypting, a 32-byte "master" key is generated from a user-supplied password for each file encrypted, using PBKDF2 with HMAC-SHA-256 as the PRF.
 
 The 16-byte salt is randomly generated from a secure random number generator, and stored in the per-file metadata.
@@ -267,6 +269,8 @@ A series of 16-byte keys are generated using counter mode:
 - AES(Master_key, IV + 4) : the fourth round key in the Feistel Cipher
 - AES(Master_key, IV + 5) : the MAC key.
 - AES(Master_key, IV + 6) : the key used for encrypting search terms.
+
+The plaintext file is then encrypted using a four-round feistel cipher, alternating AES CTR mode and HMAC rounds.
 
 UTF-8 encoded text files are indexed for search terms upon encryption. Search terms are any contiguous sequence of Unicode letters (character classes Lu, Ll, Lt, Lm, Lo), non-spacing marks (class Mn), decimel digits (Nd) and connector punctuation (Pc) between 4-12 codepoints. Search terms are casefolded, normalized, then MAC'd using HMAC-SHA-256.
 
