@@ -123,11 +123,12 @@ class Search:
 					results.append(f)
 				json_output[f] = self.keys["master"]
 			else:
-				print("Incorrect password for file %s." % p.name, file=sys.stderr)
+				if args.v:
+					print("Incorrect password for file %s." % p.name, file=sys.stderr)
 				continue
 		if not password_matches:
 			raise Exception("No files match password.")
-		if args.j:
+		if args.v:
 			print(json.dumps(json_output, indent=4), file=sys.stdout)
 		for r in results:
 			print(r, file=sys.stdout)
@@ -149,18 +150,19 @@ def parse_flags(args):
 
 		metadata_files = list(Path.cwd().glob('.fenc-meta.*'))
 		if len(metadata_files) < 1:
-			raise_err("No metadata files found.")
+			raise_err("No encrypted files found.")
 
 		password = get_password()
 		s = Search(password, metadata_files)
 		errors = 0
 		for string in inputs:
 			try:
-				s.search(string, args.j)
+				s.search(string, args.v)
 			except:
 				errors += 1
 		if errors:
-			sys.exit(1)
+			if args.v:
+				raise_err("No files matching password found.")
 
 	elif args.e or not (args.d or args.e):
 		queue = []
@@ -173,7 +175,7 @@ def parse_flags(args):
 			master_key = generate_keys(e)["master"]
 			queue.append(e)
 			json_output[fp] = master_key
-		if args.j:
+		if args.v:
 			print(json.dumps(json_output, indent=4), file=sys.stdout)
 		for job in queue:
 			try:
@@ -205,7 +207,7 @@ def parse_flags(args):
 			master_key = generate_keys(d)["master"]
 			queue[i] = d
 			json_output[fp] = master_key
-		if args.j:
+		if args.v:
 			print(json.dumps(json_output, indent=4), file=sys.stdout)
 		for job in queue:
 			job.decrypt()
@@ -343,6 +345,6 @@ if __name__ == '__main__':
 	parser.add_argument('-d', action="store_true", help='decrypt')
 	parser.add_argument('-e', action="store_true", help='encrypt')
 	parser.add_argument('-s', action="store_true", help='search')
-	parser.add_argument('-j', action="store_true", help='output master key to terminal')
+	parser.add_argument('-v', action="store_true", help='verbose output to terminal')
 	args = parser.parse_args()
 	parse_flags(parser.parse_args())

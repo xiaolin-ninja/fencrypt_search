@@ -12,22 +12,30 @@ all: encrypt search
 encrypt: $(addprefix $(PREFIX),$(TEXT_FILES) $(BINARY_FILES))
 
 $(PREFIX)%: %
-	@echo "encryptiing with password: $(shell echo -n $* | python -c 'import sys; print(repr(sys.stdin.read()))')"
-	echo -n $* | $(FENCRYPT) -e -j $*
+	@echo "encrypting with password: $(shell echo -n $* | python -c 'import sys; print(repr(sys.stdin.read()))')"
+	echo -n $* | $(FENCRYPT) -e -v $*
 
 search:
 	@echo
-	-echo -n wrongpassword | $(FENCRYPT) -s crickets
+	echo -n wrongpassword | $(FENCRYPT) -s crickets
 	@echo
 	echo -n macbeth.txt | $(FENCRYPT) -s haha
 	@echo
-	echo -n macbeth.txt | $(FENCRYPT) -s crickets
+	echo -n macbeth.txt | $(FENCRYPT) -s -v crickets
 	@echo
 	echo -n macbeth.txt | $(FENCRYPT) -s cric*
 	@echo
 	echo -n aeschylus.txt | $(FENCRYPT) -s άδραστου
 	@echo
 	echo -n aeschylus.txt | $(FENCRYPT) -s άδρασ*
+
+decrypt:
+	@echo
+	echo -n macbeth.txt | $(FENCRYPT) -d macbeth.txt
+	@echo
+	echo -n aeschylus.txt | $(FENCRYPT) -d aeschylus.txt
+	@echo
+	echo -n ecb.jpg | $(FENCRYPT) -d ecb.jpg
 
 clean:
 	@-rm *.txt* .*.txt
