@@ -1,6 +1,6 @@
 # Encrypted File Search
 
-Encrypted search for text and binary files greater than 32 bytes. Supports all unicode characters.
+The `fencrypt` program implements encrypted search for text and binary files greater than 32 bytes. Supports all unicode characters.
 
 This program also encrypts and decrypts files using a four-round feistel cipher, and supports encrypted search and ciphertext tamper detection with HMAC-SHA-256.
 
